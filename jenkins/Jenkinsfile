@@ -36,10 +36,7 @@ pipeline {
     AZUREAPP        = 'cbaov-webapp'
     AZURERG         = 'cbaov-rg'
 
-    // 🔁 Set THIS to your real Jenkins Credentials ID for GHCR PAT
-    GHCR_CRED_ID    = 'GITHUB_TOKEN'
-
-    // Do NOT preseed IMAGETAG/IMAGE here; they are computed in Prepare.
+    // Do NOT preseed IMAGETAG/IMAGE; computed in Prepare.
     PREVIEW_TAG     = ''
     PREVIEW_IMAGE   = ''
     PREVIEW_PORT    = ''
@@ -66,7 +63,7 @@ pipeline {
     stage('Prepare release + preview tags') {
       steps {
         script {
-          // Resolve branch robustly
+          // Resolve branch
           def rawBranch = env.CHANGE_BRANCH ?: env.BRANCH_NAME ?: env.GIT_BRANCH
           if (!rawBranch?.trim()) {
             rawBranch = sh(script: 'git symbolic-ref --short HEAD 2>/dev/null || echo main', returnStdout: true).trim()
@@ -75,27 +72,20 @@ pipeline {
           env.RESOLVED_BRANCH = branch
           echo "Resolved branch: ${branch}"
 
-          // Normalise VERSION
+          // VERSION selection
           def allowed      = ['auto','v1','v2','v3']
           def incoming     = (params?.VERSION ?: '').toString().trim()
           def versionParam = allowed.contains(incoming) ? incoming : 'auto'
-
-          // Decide imagetag
-          def imagetag = (versionParam == 'auto')
-                         ? ((branch == 'main') ? 'v1' : (branch == 'develop') ? 'v2' : 'v3')
-                         : versionParam
+          def imagetag     = (versionParam == 'auto')
+                             ? ((branch == 'main') ? 'v1' : (branch == 'develop') ? 'v2' : 'v3')
+                             : versionParam
           if (!imagetag?.trim()) imagetag = 'v1'
 
-          // Derived values
-          def image   = "${env.IMAGE_NAME}:${imagetag}"
-          def promote = (branch == 'main') ? 'true' : 'false'
-
-          // Export to env
           env.IMAGETAG = imagetag
-          env.IMAGE    = image
-          env.PROMOTE  = promote
+          env.IMAGE    = "${env.IMAGE_NAME}:${imagetag}"
+          env.PROMOTE  = (branch == 'main') ? 'true' : 'false'
 
-          // PR preview setup
+          // PR preview
           if (env.CHANGE_ID) {
             def previewTag  = "pr-${env.CHANGE_ID}"
             def previewImg  = "${env.IMAGE_NAME}:${previewTag}"
@@ -115,7 +105,7 @@ pipeline {
           }
 
           echo "Using VERSION param: '${versionParam}' -> resolved IMAGETAG: ${imagetag}"
-          echo "Image: ${image} (Promote on main: ${promote})"
+          echo "Image: ${env.IMAGE} (Promote on main: ${env.PROMOTE})"
         }
       }
     }
@@ -138,7 +128,13 @@ pipeline {
 
     stage('Build image') {
       steps {
-        withEnv(["IMAGETAG=${env.IMAGETAG}", "IMAGE=${env.IMAGE}"]) {
+        withEnv([
+          "IMAGETAG=${env.IMAGETAG}",
+          "IMAGE=${env.IMAGE}",
+          // force empty strings for preview vars when not set
+          "PREVIEW_TAG=${env.PREVIEW_TAG ?: ''}",
+          "PREVIEW_IMAGE=${env.PREVIEW_IMAGE ?: ''}"
+        ]) {
           sh '''
             set -euo pipefail
             echo "Building from SITE_SRC=web/${IMAGETAG} -> ${IMAGE}"
@@ -147,7 +143,9 @@ pipeline {
               -t "${IMAGE}" \
               -f docker/site/Dockerfile .
 
-            if [ -n "${PREVIEW_TAG:-}" ]; then
+            # Tag preview image (only if real value)
+            if [ -n "${PREVIEW_TAG:-}" ] && [ "${PREVIEW_TAG}" != "null" ] \
+               && [ -n "${PREVIEW_IMAGE:-}" ] && [ "${PREVIEW_IMAGE}" != "null" ]; then
               docker tag "${IMAGE}" "${PREVIEW_IMAGE}"
             fi
           '''
@@ -158,15 +156,23 @@ pipeline {
     stage('Push image(s)') {
       when { expression { return params.PUSH_TO_REGISTRY } }
       steps {
-        withCredentials([string(credentialsId: "${env.GHCR_CRED_ID}", variable: 'GITHUBTOKEN')]) {
-          withEnv(["IMAGE=${env.IMAGE}", "PREVIEW_TAG=${env.PREVIEW_TAG}", "PREVIEW_IMAGE=${env.PREVIEW_IMAGE}"]) {
+        withCredentials([string(credentialsId: 'GITHUBTOKEN', variable: 'GITHUBTOKEN')]) {
+          withEnv([
+            "IMAGE=${env.IMAGE}",
+            "PREVIEW_TAG=${env.PREVIEW_TAG ?: ''}",
+            "PREVIEW_IMAGE=${env.PREVIEW_IMAGE ?: ''}"
+          ]) {
             sh '''
               set -euo pipefail
               echo "$GITHUBTOKEN" | docker login ghcr.io -u vince-cbaov --password-stdin
               docker push "${IMAGE}"
-              if [ -n "${PREVIEW_TAG:-}" ]; then
+
+              # Guard against "null" passed from Jenkins
+              if [ -n "${PREVIEW_TAG:-}" ] && [ "${PREVIEW_TAG}" != "null" ] \
+                 && [ -n "${PREVIEW_IMAGE:-}" ] && [ "${PREVIEW_IMAGE}" != "null" ]; then
                 docker push "${PREVIEW_IMAGE}"
               fi
+
               docker logout ghcr.io
             '''
           }
@@ -205,7 +211,7 @@ pipeline {
     stage('Promote v2 → v1 on main') {
       when { expression { return env.PROMOTE == 'true' } }
       steps {
-        withCredentials([string(credentialsId: "${env.GHCR_CRED_ID}", variable: 'GITHUBTOKEN')]) {
+        withCredentials([string(credentialsId: 'GITHUBTOKEN', variable: 'GITHUBTOKEN')]) {
           withEnv(["IMAGE_NAME=${env.IMAGE_NAME}"]) {
             sh '''
               set -euo pipefail
@@ -235,13 +241,13 @@ pipeline {
     stage('Deploy (prod or preview) to Docker VM') {
       steps {
         sshagent(credentials: ['vinadmin']) {
-          withCredentials([string(credentialsId: "${env.GHCR_CRED_ID}", variable: 'GITHUBTOKEN')]) {
+          withCredentials([string(credentialsId: 'GITHUBTOKEN', variable: 'GITHUBTOKEN')]) {
             withEnv([
               "IMAGE=${env.IMAGE}",
-              "PREVIEW_TAG=${env.PREVIEW_TAG}",
-              "PREVIEW_IMAGE=${env.PREVIEW_IMAGE}",
-              "PREVIEW_PORT=${env.PREVIEW_PORT}",
-              "PREVIEW_NAME=${env.PREVIEW_NAME}",
+              "PREVIEW_TAG=${env.PREVIEW_TAG ?: ''}",
+              "PREVIEW_IMAGE=${env.PREVIEW_IMAGE ?: ''}",
+              "PREVIEW_PORT=${env.PREVIEW_PORT ?: ''}",
+              "PREVIEW_NAME=${env.PREVIEW_NAME ?: ''}",
               "PUBLISH_PORT=${env.PUBLISH_PORT}",
               "CONTAINER_BASE=${env.CONTAINER_BASE}",
               "SSH_USERNAME=${env.SSH_USERNAME}",
@@ -252,7 +258,7 @@ pipeline {
               sh '''
                 set -euo pipefail
 
-                if [ -n "${PREVIEW_TAG:-}" ]; then
+                if [ -n "${PREVIEW_TAG:-}" ] && [ "${PREVIEW_TAG}" != "null" ]; then
                   ssh -o StrictHostKeyChecking=no "${SSH_USERNAME}@${DOCKER_HOST_IP}" "docker rm -f '${PREVIEW_NAME}' || true"
                   if [ "${PUSH_TO_REGISTRY}" = "true" ]; then
                     if [ "${GHCR_PRIVATE}" = "true" ]; then
@@ -302,14 +308,14 @@ pipeline {
             "CONTAINER_BASE=${env.CONTAINER_BASE}",
             "SSH_USERNAME=${env.SSH_USERNAME}",
             "DOCKER_HOST_IP=${env.DOCKER_HOST_IP}",
-            "PREVIEW_PORT=${env.PREVIEW_PORT}",
-            "PREVIEW_NAME=${env.PREVIEW_NAME}"
+            "PREVIEW_PORT=${env.PREVIEW_PORT ?: ''}",
+            "PREVIEW_NAME=${env.PREVIEW_NAME ?: ''}"
           ]) {
             sh '''
               set -euo pipefail
               TARGET_PORT="${PREVIEW_PORT:-}"
               TARGET_NAME="${PREVIEW_NAME:-}"
-              if [ -z "${TARGET_PORT}" ]; then
+              if [ -z "${TARGET_PORT}" ] || [ "${TARGET_PORT}" = "null" ]; then
                 TARGET_PORT="${PUBLISH_PORT}"
                 TARGET_NAME="${CONTAINER_BASE}-prod"
               fi
