@@ -1,6 +1,6 @@
 
 pipeline {
-  agent { label 'docker-agent' }  // matches your node
+  agent { label 'docker-agent' }
 
   options {
     timestamps()
@@ -36,7 +36,7 @@ pipeline {
     AZUREAPP        = 'cbaov-webapp'
     AZURERG         = 'cbaov-rg'
 
-    // Safe non-null defaults so early echoes never print "null"
+    // Safe non-null defaults
     PREVIEW_TAG     = ''
     PREVIEW_IMAGE   = ''
     PREVIEW_PORT    = ''
@@ -48,6 +48,7 @@ pipeline {
   }
 
   stages {
+
     stage('Checkout') {
       steps {
         checkout([
@@ -64,7 +65,7 @@ pipeline {
     stage('Prepare release + preview tags') {
       steps {
         script {
-          // --- Branch resolution (robust across job types)
+          // --- Resolve branch
           def rawBranch = env.CHANGE_BRANCH ?: env.BRANCH_NAME ?: env.GIT_BRANCH
           if (!rawBranch?.trim()) {
             rawBranch = sh(
@@ -72,47 +73,40 @@ pipeline {
               returnStdout: true
             ).trim()
           }
-
-          // Normalize: strip common prefixes (e.g., 'origin/main', 'refs/heads/main')
-          def branch = rawBranch
-            .replaceFirst(/^origin\//, '')
-            .replaceFirst(/^refs\/heads\//, '')
-            .trim()
-
+          def branch = rawBranch.replaceFirst(/^origin\//, '')
+                                .replaceFirst(/^refs\/heads\//, '')
+                                .trim()
           env.RESOLVED_BRANCH = branch
           echo "Resolved branch: ${branch}"
 
-          // --- VERSION param normalisation & default to 'auto'
+          // --- Normalise VERSION param
           def allowed      = ['auto','v1','v2','v3']
           def incoming     = (params?.VERSION ?: '').toString().trim()
           def versionParam = allowed.contains(incoming) ? incoming : 'auto'
 
-          // --- Decide imagetag locally (avoid env.* until final)
+          // --- Decide imagetag
           def imagetag
           if (versionParam == 'auto') {
-            imagetag = (branch == 'main') ? 'v1'
-                    : (branch == 'develop') ? 'v2'
-                    : 'v3'
+            imagetag = (branch == 'main')    ? 'v1' :
+                       (branch == 'develop') ? 'v2' : 'v3'
           } else {
             imagetag = versionParam
           }
-
-          // Fail-safe default if anything odd happens
           if (!imagetag?.trim()) {
-            echo "[WARN] IMAGETAG was empty; forcing 'v1' (branch=${branch}, params.VERSION='${incoming}')"
+            echo "[WARN] IMAGETAG empty; forcing 'v1' (branch=${branch}, params.VERSION='${incoming}')"
             imagetag = 'v1'
           }
 
-          // Compute derived values locally
+          // Derived values
           def image   = "${IMAGE_NAME}:${imagetag}"
           def promote = (branch == 'main') ? 'true' : 'false'
 
-          // --- Export final values to environment (property-style)
+          // Export to env
           env.IMAGETAG = imagetag
           env.IMAGE    = image
           env.PROMOTE  = promote
 
-          // PR preview setup (Multibranch PR builds)
+          // PR preview config
           if (env.CHANGE_ID) {
             def previewTag  = "pr-${env.CHANGE_ID}"
             def previewImg  = "${IMAGE_NAME}:${previewTag}"
@@ -133,22 +127,23 @@ pipeline {
             env.PREVIEW_NAME  = ''
           }
 
-          // Final status (use local vars to avoid any env timing quirks)
           echo "Using VERSION param: '${versionParam}' -> resolved IMAGETAG: ${imagetag}"
           echo "Image: ${image} (Promote on main: ${promote})"
         }
       }
     }
 
-    // 🔧 NEW: Validate Flask layout (not static HTML)
+    // Validate required assets for the selected version
     stage('Validate version assets') {
       steps {
         sh '''
           set -e
           echo "Validating Flask layout for tag: ${IMAGETAG}"
-          test -f "web/${IMAGETAG}/app.py" || { echo "Missing app.py in web/${IMAGETAG}"; exit 1; }
-          test -f "web/${IMAGETAG}/templates/index.html" || { echo "Missing templates/index.html in web/${IMAGETAG}"; exit 1; }
-          test -f "web/${IMAGETAG}/static/cbaov_logo.png" || { echo "Missing static/cbaov_logo.png in web/${IMAGETAG}"; exit 1; }
+          test -f "web/${IMAGETAG}/app.py"                       || { echo "Missing app.py in web/${IMAGETAG}"; exit 1; }
+          test -d "web/${IMAGETAG}/templates"                    || { echo "Missing templates/ in web/${IMAGETAG}"; exit 1; }
+          test -f "web/${IMAGETAG}/templates/index.html"         || { echo "Missing templates/index.html in web/${IMAGETAG}"; exit 1; }
+          test -d "web/${IMAGETAG}/static"                       || { echo "Missing static/ in web/${IMAGETAG}"; exit 1; }
+          ls -1 "web/${IMAGETAG}/static" | grep -q .             || { echo "No assets in static/ for ${IMAGETAG}"; exit 1; }
         '''
       }
     }
@@ -157,11 +152,13 @@ pipeline {
       steps {
         sh '''
           set -euo pipefail
+          echo "Building from SITE_SRC=web/${IMAGETAG} -> ${IMAGE}"
           docker build \
             --build-arg "SITE_SRC=web/${IMAGETAG}" \
             -t "${IMAGE}" \
             -f docker/site/Dockerfile .
 
+          # Tag preview image (if PR build)
           if [ -n "${PREVIEW_TAG:-}" ]; then
             docker tag "${IMAGE}" "${PREVIEW_IMAGE}"
           fi
@@ -172,7 +169,7 @@ pipeline {
     stage('Push image(s)') {
       when { expression { return params.PUSH_TO_REGISTRY } }
       steps {
-        withCredentials([string(credentialsId: 'GITHUB_TOKEN', variable: 'GITHUBTOKEN')]) {
+        withCredentials([string(credentialsId: 'GITHUBTOKEN', variable: 'GITHUBTOKEN')]) {
           sh '''
             set -euo pipefail
             echo "$GITHUBTOKEN" | docker login ghcr.io -u vince-cbaov --password-stdin
@@ -195,7 +192,7 @@ pipeline {
             script: "docker inspect --format='{{index .RepoDigests 0}}' '${env.IMAGE}' 2>/dev/null || true"
           ).trim()
           echo "Built digest: ${built}"
-          if (!built) { echo 'No RepoDigest yet (image not pushed?)'; return }
+          if (!built) { echo 'No RepoDigest (image not pushed?)'; return }
 
           if (env.IMAGETAG == 'v2') {
             sh "docker pull '${env.IMAGE_NAME}:v1' || true"
@@ -219,11 +216,11 @@ pipeline {
       }
     }
 
-    // (Optional) You can change this to: when { expression { env.RESOLVED_BRANCH == 'main' } }
+    // Only runs on main (env.PROMOTE is set to 'true' in Prepare stage when branch == main)
     stage('Promote v2 → v1 on main') {
       when { expression { return env.PROMOTE == 'true' } }
       steps {
-        withCredentials([string(credentialsId: 'GITHUB_TOKEN', variable: 'GITHUBTOKEN')]) {
+        withCredentials([string(credentialsId: 'GITHUBTOKEN', variable: 'GITHUBTOKEN')]) {
           sh '''
             set -euo pipefail
             echo "[Promote] Checking if v2 should be promoted to v1..."
@@ -250,14 +247,13 @@ pipeline {
 
     stage('Deploy (prod or preview) to Docker VM') {
       steps {
-        sshagent (credentials: ['docker-agents']) {
-          // allow the remote to pull from GHCR when package is private
-          withCredentials([string(credentialsId: 'GITHUB_TOKEN', variable: 'GITHUBTOKEN')]) {
+        sshagent(credentials: ['vinadmin']) {
+          withCredentials([string(credentialsId: 'GITHUBTOKEN', variable: 'GITHUBTOKEN')]) {
             sh '''
               set -euo pipefail
 
               if [ -n "${PREVIEW_TAG:-}" ]; then
-                # Preview deployment on dynamic port
+                # Preview deployment
                 ssh -o StrictHostKeyChecking=no "${SSH_USERNAME}@${DOCKER_HOST_IP}" "docker rm -f '${PREVIEW_NAME}' || true"
 
                 if [ "${PUSH_TO_REGISTRY}" = "true" ]; then
@@ -265,8 +261,7 @@ pipeline {
                     ssh -o StrictHostKeyChecking=no "${SSH_USERNAME}@${DOCKER_HOST_IP}" \
                       "echo \\"${GITHUBTOKEN}\\" | docker login ghcr.io -u vince-cbaov --password-stdin && docker pull '${PREVIEW_IMAGE}'"
                   else
-                    ssh -o StrictHostKeyChecking=no "${SSH_USERNAME}@${DOCKER_HOST_IP}" \
-                      "docker pull '${PREVIEW_IMAGE}'"
+                    ssh -o StrictHostKeyChecking=no "${SSH_USERNAME}@${DOCKER_HOST_IP}" "docker pull '${PREVIEW_IMAGE}'"
                   fi
                 else
                   docker save "${PREVIEW_IMAGE}" | ssh -o StrictHostKeyChecking=no "${SSH_USERNAME}@${DOCKER_HOST_IP}" 'docker load'
@@ -278,17 +273,16 @@ pipeline {
                 echo "Preview URL: http://${DOCKER_HOST_IP}:${PREVIEW_PORT}/"
 
               else
-                # Production deployment (v1 on port 8080)
+                # Production deployment
                 PROD_NAME="${CONTAINER_BASE}-prod"
                 ssh -o StrictHostKeyChecking=no "${SSH_USERNAME}@${DOCKER_HOST_IP}" "docker rm -f '${PROD_NAME}' || true"
 
                 if [ "${PUSH_TO_REGISTRY}" = "true" ]; then
-                  if [ "${GHCR_PRIVATE}" = "true" ]; then
+                  if [ "${GHCR_PRIVATE}" = "true" ] ; then
                     ssh -o StrictHostKeyChecking=no "${SSH_USERNAME}@${DOCKER_HOST_IP}" \
                       "echo \\"${GITHUBTOKEN}\\" | docker login ghcr.io -u vince-cbaov --password-stdin && docker pull '${IMAGE}'"
                   else
-                    ssh -o StrictHostKeyChecking=no "${SSH_USERNAME}@${DOCKER_HOST_IP}" \
-                      "docker pull '${IMAGE}'"
+                    ssh -o StrictHostKeyChecking=no "${SSH_USERNAME}@${DOCKER_HOST_IP}" "docker pull '${IMAGE}'"
                   fi
                 else
                   docker save "${IMAGE}" | ssh -o StrictHostKeyChecking=no "${SSH_USERNAME}@${DOCKER_HOST_IP}" 'docker load'
@@ -305,14 +299,11 @@ pipeline {
       }
     }
 
-    // 🔧 UPDATED: Health checks that retry and dump remote logs if failing
     stage('Health checks') {
       steps {
-        sshagent (credentials: ['docker-agents']) {
+        sshagent(credentials: ['vinadmin']) {
           sh '''
             set -euo pipefail
-
-            # Decide target port and container name
             TARGET_PORT="${PREVIEW_PORT:-}"
             TARGET_NAME="${PREVIEW_NAME:-}"
             if [ -z "${TARGET_PORT}" ]; then
@@ -322,22 +313,20 @@ pipeline {
 
             echo "Health check: http://${DOCKER_HOST_IP}:${TARGET_PORT}/ (container=${TARGET_NAME})"
 
-            # Retry up to ~30s for readiness
             for i in $(seq 1 10); do
               if curl --fail --max-time 3 "http://${DOCKER_HOST_IP}:${TARGET_PORT}/" >/dev/null 2>&1; then
                 echo "Health check passed on attempt $i."
                 exit 0
               fi
-              echo "Attempt $i: service not ready yet; waiting 3s..."
+              echo "Attempt $i: service not ready; waiting 3s..."
               sleep 3
             done
 
-            echo "❌ Health check failed; dumping remote container status and logs..."
+            echo "❌ Health check failed; dumping remote logs..."
             ssh -o StrictHostKeyChecking=no "${SSH_USERNAME}@${DOCKER_HOST_IP}" \
               "docker ps -a --filter name='${TARGET_NAME}' --format 'Status: {{.Status}}' || true"
             ssh -o StrictHostKeyChecking=no "${SSH_USERNAME}@${DOCKER_HOST_IP}" \
               "docker logs --tail 200 '${TARGET_NAME}' || true"
-
             exit 1
           '''
         }
