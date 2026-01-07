@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>CBAOV</title>
+    <link rel="icon" href="{{ url_for('static', filename='cbaov_logo.png') }}">
+    <style>
+        body { font-family: 'Segoe UI', sans-serif; margin: 0; padding: 0; background-color: #f4f7f9; color: #333; }
+        header, footer { background-color: #002244; color: white; padding: 1rem; text-align: center; }
+        main { padding: 2rem; text-align: center; }
+        img.logo { width: 120px; height: auto; }
+    </style>
+</head>
+<body>
+    <header>
+        <img src="{{ url_for('static', filename='cbaov_logo.png') }}" alt="CBAOV Logo" class="logo">
+        <h1>Core Borne Aerial Operations Vehicle</h1>
+    </header>
+    <main>
+        <h2>Welcome to CBAOV</h2>
+        <p>Secure. Scalable. Globally deployable.</p>
+    </main>
+    <footer>
+        &copy; {{ current_year }} CBAOV. All rights reserved.
+    </footer>
+</body>
+</html>

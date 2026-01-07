@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block title %}About CBAOV{% endblock %}
+{% block content %}
+    <h2>About Core Borne Aerial Operations Vehicle</h2>
+    <p>
+        CBAOV pioneers modular drone systems for global deployment, resilience, and tactical intelligence.
+        Our mission is to deliver scalable aerial platforms for surveillance, delivery, and disaster response.
+    </p>
+    <div style="display: flex; justify-content: center; gap: 20px; flex-wrap: wrap;">
+        <img src="{{ url_for('static', filename='prototype1.png') }}" alt="Urban Surveillance Drone" width="300">
+        <img src="{{ url_for('static', filename='prototype2.png') }}" alt="Long-Range Delivery Drone" width="300">
+        <img src="{{ url_for('static', filename='prototype3.png') }}" alt="Disaster Response Drone" width="300">
+    </div>
+{% endblock %}
