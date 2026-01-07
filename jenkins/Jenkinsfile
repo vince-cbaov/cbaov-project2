@@ -145,6 +145,9 @@ pipeline {
           test -f "web/$IMAGETAG/app.py"                || { echo "Missing app.py in web/$IMAGETAG"; exit 1; }
           test -d "web/$IMAGETAG/templates"             || { echo "Missing templates/ in web/$IMAGETAG"; exit 1; }
           test -f "web/$IMAGETAG/templates/index.html"  || { echo "Missing templates/index.html in web/$IMAGETAG"; exit 1; }
+          if [ "$IMAGETAG" = "v3" ]; then
+            test -f "web/$IMAGETAG/templates/contact.html" || { echo "Missing templates/contact.html for v3"; exit 1; }
+          fi
           test -d "web/$IMAGETAG/static"                || { echo "Missing static/ in web/$IMAGETAG"; exit 1; }
           ls -1 "web/$IMAGETAG/static" | grep -q .      || { echo "No assets in static/ for $IMAGETAG"; exit 1; }
         '''
@@ -194,9 +197,13 @@ pipeline {
         withCredentials([string(credentialsId: env.GHCR_CRED_ID, variable: 'GITHUBTOKEN')]) {
           sh '''
             set -euo pipefail
+
             built=$(docker inspect --format='{{index .RepoDigests 0}}' "$IMAGE" 2>/dev/null || true)
             echo "Built digest: $built"
-            [ -n "$built" ] || { echo "No RepoDigest (image not pushed?)"; exit 0; }
+            if [ -z "$built" ]; then
+              echo "No RepoDigest (image not pushed?) — skipping guardrail."
+              exit 0
+            fi
 
             if [ "$IMAGETAG" = "v2" ]; then
               echo "$GITHUBTOKEN" | docker login ghcr.io -u vince-cbaov --password-stdin
@@ -204,7 +211,12 @@ pipeline {
               v1d=$(docker inspect --format='{{index .RepoDigests 0}}' "$IMAGE_NAME:v1" 2>/dev/null || true)
               docker logout ghcr.io
               echo "v1 digest: $v1d"
-              [ -n "$v1d" ] && [ "$built" = "$v1d" ] && { echo "Digest for v2 matches v1 — build did not change!"; exit 1; }
+              if [ -n "$v1d" ] && [ "$built" = "$v1d" ]; then
+                echo "❌ Digest for v2 matches v1 — build did not change!"
+                exit 1
+              else
+                echo "✅ v2 digest differs from v1 — proceeding."
+              fi
             fi
 
             if [ "$IMAGETAG" = "v3" ]; then
@@ -213,8 +225,16 @@ pipeline {
               v2d=$(docker inspect --format='{{index .RepoDigests 0}}' "$IMAGE_NAME:v2" 2>/dev/null || true)
               docker logout ghcr.io
               echo "v2 digest: $v2d"
-              [ -n "$v2d" ] && [ "$built" = "$v2d" ] && { echo "Digest for v3 matches v2 — build did not change!"; exit 1; }
+              if [ -n "$v2d" ] && [ "$built" = "$v2d" ]; then
+                echo "❌ Digest for v3 matches v2 — build did not change!"
+                exit 1
+              else
+                echo "✅ v3 digest differs from v2 — proceeding."
+              fi
             fi
+
+            # Ensure the stage succeeds unless we explicitly exited 1 above
+            exit 0
           '''
         }
       }
